@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# FINAL BOT: 15-min buy | 5-min sell check | +3% TP | -1.5% SL
+# bot_final.py — SELL ALL FIRST → THEN 24/7 TRADING
+# EC2 SESSION MANAGER READY
 import requests
 import hashlib
 import hmac
@@ -11,9 +12,9 @@ SECRET = "5CL4KCVLEYyLLaSq2Jg7VCCu3QsWQYTcv1gQTMngnBG81YJ9VWopJBIwIqsaNjqR"
 BASE_URL = "https://mock-api.roostoo.com"
 
 # GLOBALS
-bought_stocks = {}        # {pair: {"price": X, "qty": Y}}
-next_sell_check = 0       # Every 5 minutes
-next_buy_time = 0         # Every 15 minutes
+bought_stocks = {}
+next_sell_check = 0
+next_buy_time = 0
 stopgainloss = False
 stock_index = 0
 
@@ -23,6 +24,47 @@ def sign(params):
     return hmac.new(SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
 
 
+# === 1. SELL ALL HOLDINGS (RUN ONCE) ===
+def sell_all_once():
+    print(f"\nSELL ALL HOLDINGS — {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
+    payload = {"timestamp": int(time.time() * 1000)}
+    r = requests.get(
+        BASE_URL + "/v3/balance",
+        params=payload,
+        headers={"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
+    )
+    data = r.json().get("SpotWallet", {})
+    sold = 0
+    for asset, info in data.items():
+        free = info.get("Free", 0)
+        if free > 0 and asset != "USD":
+            pair = f"{asset}/USD"
+            qty = round(free, 6)
+            print(f"[SELL] {qty} {pair}")
+            p = {
+                "timestamp": int(time.time() * 1000),
+                "pair": pair,
+                "side": "SELL",
+                "quantity": qty,
+                "type": "MARKET"
+            }
+            r2 = requests.post(
+                BASE_URL + "/v3/place_order",
+                data=p,
+                headers={"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(p)}
+            )
+            res = r2.json().get("OrderDetail", {})
+            status = res.get("Status", "ERROR")
+            price = res.get("FilledAverPrice", "N/A")
+            print(f"  → {status} @ {price}")
+            if status == "FILLED":
+                sold += 1
+            time.sleep(1)
+    print(f"SELL ALL COMPLETE — {sold} assets sold\n")
+    print("-" * 60)
+
+
+# === 2. TRADING FUNCTIONS ===
 def get_ticker():
     r = requests.get(BASE_URL + "/v3/ticker", params={"timestamp": int(time.time())})
     print(f"[DEBUG] ticker: {r.status_code}")
@@ -63,25 +105,33 @@ def place_order(pair, side, qty):
     return res
 
 
-# MAIN LOOP
+# === MAIN: SELL ALL → THEN TRADE FOREVER ===
 if __name__ == "__main__":
-    print("FINAL BOT STARTED - LIVE TRADING")
-    print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')} HKT | HK")
+    print("BOT STARTED — EC2 SESSION MANAGER")
+    print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
+    print("Step 1: Sell all holdings")
+    print("Step 2: Start 15-min buy / 5-min sell trading")
+    print("-" * 60)
+
+    # === RUN SELL ALL ONCE ===
+    sell_all_once()
+
+    # === START TRADING LOOP ===
+    print("TRADING LOOP STARTED")
     print("Buy: every 15 min | Sell Check: every 5 min | TP: +3% | SL: -1.5%")
+    print("-" * 60)
 
     while True:
         now = time.time()
-        market = {}
 
-        # SELL CHECK: Every 5 minutes
+        # SELL CHECK
         if now >= next_sell_check and bought_stocks:
             print(f"\n[SELL CHECK] @ {time.strftime('%H:%M:%S')}")
-            _, _, market = get_ticker()
+            rising, prices, market = get_ticker()
             for pair, pos in list(bought_stocks.items()):
                 cur = market[pair].get("AskPrice") or market[pair]["LastPrice"]
                 pnl = (cur - pos["price"]) / pos["price"]
                 print(f"  [P/L] {pair}: {pnl:+.2%}")
-
                 if pnl >= 0.03:
                     print(f"  TAKE PROFIT +3%")
                     place_order(pair, "SELL", pos["qty"])
@@ -90,10 +140,9 @@ if __name__ == "__main__":
                     print(f"  STOP-LOSS -1.5%")
                     place_order(pair, "SELL", pos["qty"])
                     stopgainloss = True
+            next_sell_check = now + 300
 
-            next_sell_check = now + 300  # 5 minutes
-
-        # BUY CYCLE: Every 15 minutes OR after sell
+        # BUY CYCLE
         if now >= next_buy_time or stopgainloss:
             print(f"\n[BUY CYCLE] @ {time.strftime('%H:%M:%S')}")
             rising, prices, market = get_ticker()
@@ -104,7 +153,7 @@ if __name__ == "__main__":
                 print(f"[BUY] Selecting {pair} @ {price:.6f} → Qty: {qty}")
                 place_order(pair, "BUY", qty)
                 stock_index += 1
-            next_buy_time = now + 900  # 15 minutes
+            next_buy_time = now + 900
             stopgainloss = False
 
         time.sleep(10)

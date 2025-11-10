@@ -15,6 +15,7 @@ BASE_URL = "https://mock-api.roostoo.com"
 # Initialize globals
 # -------------------
 next_trade_time = int(time.time()) * 1000
+next_sell_check_time = int(time.time()) * 1000
 stopgainloss = False
 global_pricediff = 0
 theorderid = None
@@ -24,6 +25,8 @@ current_price = []
 bought_stocks = {}    # Track: stock → {"price": X, "qty": Y}
 stock_index = 0       # Rotate through buy_stocks
 exchange_info = {}
+order_info = {}       # orderid → {"stock":, "side":, "qty":, "price":}
+expected_buy_price = 0
 
 def generate_signature(params):
     query_string = '&'.join(["{}={}".format(k, params[k])
@@ -65,6 +68,47 @@ def pending_count():
     )
     print (r.status_code, r.text)
     return r.json()
+
+
+def handle_filled(orderid, data):
+    global global_pricediff
+    global stopgainloss
+    if orderid not in order_info:
+        return
+
+    info = order_info[orderid]
+    stock = info["stock"]
+    side = info["side"]
+    qty = info["qty"]
+    placed_price = info["price"]
+
+    # Get status
+    status = data.get("Status")
+    if not status and "OrderDetail" in data:
+        status = data["OrderDetail"].get("Status")
+
+    if status != "Filled":
+        return
+
+    # Get filled_price
+    filled_price = data.get("Price")
+    if not filled_price and "OrderDetail" in data:
+        filled_price = data["OrderDetail"].get("Price")
+    if not filled_price:
+        filled_price = placed_price  # Fallback for limit orders
+
+    if side == "BUY":
+        bought_stocks[stock] = {"price": filled_price, "qty": qty}
+        # pricediff
+        if expected_buy_price != 0 and filled_price:
+            global_pricediff = (filled_price - expected_buy_price) / expected_buy_price
+            if global_pricediff <= -0.015 or global_pricediff >= 0.03:
+                stopgainloss = True
+    elif side == "SELL":
+        if stock in bought_stocks:
+            del bought_stocks[stock]
+
+    del order_info[orderid]
 
 
 # -------------------
@@ -114,8 +158,7 @@ def get_balance():
 def place_order(stock, side, qty, price=None):
     global theorderid
     global next_trade_time
-    global global_pricediff
-    global stopgainloss
+    global ispending
     if stock in exchange_info:
         amount_precision = exchange_info[stock].get("AmountPrecision", 0)
         qty = round(float(qty), amount_precision)
@@ -148,19 +191,16 @@ def place_order(stock, side, qty, price=None):
         stuff = r.json()
     except ValueError:
         print("⚠️ place_order(): Invalid JSON response:", r.text)
+        return
 
     if "OrderDetail" in stuff:
         theorderid = stuff["OrderDetail"].get("OrderID", None)
-        newprice = stuff["OrderDetail"].get("Price", None)
-        if side == "BUY" and stuff["OrderDetail"].get("Status") == "Filled":
-                    if stock not in bought_stocks:
-                        bought_stocks[stock] = {"price": newprice or price, "qty": qty}
-
-        # Calculate price diff when possible
-        if current_price and current_price[0] != 0 and newprice:
-            global_pricediff = (newprice - current_price[0]) / current_price[0]
-            if global_pricediff <= -0.015 or global_pricediff >= 0.03:
-                stopgainloss = True
+        status = stuff["OrderDetail"].get("Status", None)
+        if theorderid:
+            order_info[theorderid] = {"stock": stock, "side": side, "qty": qty, "price": price}
+            handle_filled(theorderid, stuff)
+            if status != "Filled":
+                ispending = True
 
     # Next trade allowed after 15 minutes
     next_trade_time = int(time.time()) * 1000 + (15 * 60 * 1000)
@@ -210,6 +250,10 @@ def query_order():
         data = r.json()
     except ValueError:
         print("Fquery_order(): Invalid JSON response:", r.text)
+        return
+
+    handle_filled(theorderid, data)
+
     if data.get("Status") == "Pending":
         next_trade_time = int(time.time()) * 1000 + 15 * 60 * 1000
         ispending = True
@@ -226,14 +270,12 @@ if __name__ == '__main__':
     while True:
         now = int(time.time()) * 1000
 
-        # Main trading execution every 15 minutes or when stopgainloss flag set
-        if (next_trade_time <= now) or stopgainloss:
-            get_server_time()
-            get_ex_info()
-            ticker_data = get_ticker()
-            get_balance()
+        if ispending:
+            query_order()
 
-            # === PROFIT-TAKING & STOP-LOSS SELL ===
+        # Main trading execution every 15 minutes or when stopgainloss flag set
+        if next_sell_check_time <= now:
+            ticker_data = get_ticker()          # refresh prices
             sold = False
             for stock, info in list(bought_stocks.items()):
                 current_ask = None
@@ -244,17 +286,28 @@ if __name__ == '__main__':
                     profit_pct = (current_ask - info["price"]) / info["price"]
                     if profit_pct >= 0.03 or profit_pct <= -0.015:
                         place_order(stock, "SELL", info["qty"])
-                        del bought_stocks[stock]
                         stopgainloss = True
                         sold = True
                         break
 
-            # === BUY NEXT STOCK (rotate) ===
+            # schedule next sell‑check
+            next_sell_check_time = now + (5 * 60 * 1000)   # 5 minutes later
+
+        # -------------------------------------------------
+        # 2. BUY / 15‑minute main cycle
+        # -------------------------------------------------
+        if (next_trade_time <= now) or stopgainloss:
+            get_server_time()
+            get_ex_info()
+            ticker_data = get_ticker()          # already fresh from sell‑check if it ran
+            get_balance()
+
+            # (the original BUY block – unchanged)
             if not stopgainloss and not sold and buy_stocks:
                 idx = stock_index % len(buy_stocks)
                 stock = buy_stocks[idx]
-                # Find matching price by index
                 price = current_price[idx]
+                expected_buy_price = price
                 qty = 1000 / price
 
                 place_order(stock, "BUY", qty)
@@ -266,13 +319,22 @@ if __name__ == '__main__':
                 pending_count()
 
             if not buy_stocks:
-                stock_index = 0  # Reset rotation if no candidates
+                stock_index = 0
 
-            stopgainloss = False  # Reset flag after action
+            # 15‑minute cooldown for the *next* BUY
+            next_trade_time = int(time.time()) * 1000 + (15 * 60 * 1000)
 
-        # Cancel if loss threshold triggered
+            stopgainloss = False          # reset after any action
+
+        # -------------------------------------------------
+        # Pending‑order handling (unchanged)
+        # -------------------------------------------------
+        if ispending:
+            query_order()
+
         if global_pricediff <= -0.015 and ispending:
             cancel_order()
 
-        # Sleep check interval (10 seconds)
+        pending_count()
+
         time.sleep(10)

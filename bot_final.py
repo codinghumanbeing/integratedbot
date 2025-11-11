@@ -25,69 +25,90 @@ def get_server_time():
         return r.json().get("serverTime")
     return int(time.time() * 1000)
 
-def get_balance():
-    payload = {"timestamp": get_server_time() or int(time.time() * 1000)}
-    r = requests.get(
-        BASE_URL + "/v3/balance",
-        params=payload,
-        headers={"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
-    )
-    return r.json()
 
 def sign(params):
     query = '&'.join([f"{k}={params[k]}" for k in sorted(params)])
     return hmac.new(SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
 
 
-# === 1. SELL ALL HOLDINGS (RUN ONCE) ===
+# === 1. SELL ALL HOLDINGS (RUN ONCE - BULLETPROOF VERSION) ===
 def sell_all_at_once():
     print(f"\nSELL ALL HOLDINGS — {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
     
-    # Get balance using the same payload structure
-    payload = {"timestamp": int(time.time() * 1000)}
+    # Get server time
+    ts = get_server_time()
+    
+    # Get balance
+    payload = {"timestamp": ts}
     r = requests.get(
         BASE_URL + "/v3/balance",
         params=payload,
         headers={"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
     )
-    data = r.json().get("Wallet", {})   # <-- CHANGED: "Wallet" instead of "SpotWallet"
+    print(f"[DEBUG] Balance response: {r.status_code} - {r.text[:300]}...")
+    
+    if r.status_code != 200:
+        print(f"ERROR: Balance fetch failed - {r.text}")
+        return
+    
+    data = r.json().get("Wallet", {})
+    print(f"[DEBUG] Wallet keys: {list(data.keys())}")
     
     sold = 0
+    failed = []
     for asset, info in data.items():
-        free = info.get("Free", 0)       # <-- CHANGED: "Free" (capital F)
-        if free > 0 and asset != "USD":
+        free = info.get("Free", 0)
+        if free > 0.0001 and asset != "USD":  # Skip dust & USD
             pair = f"{asset}/USD"
             qty = round(free, 6)
             print(f"[SELL] {qty} {pair}")
             
-            p = {
-                "timestamp": int(time.time() * 1000),
-                "pair": pair,
-                "side": "SELL",
-                "quantity": qty,
-                "type": "MARKET"
-            }
-            r2 = requests.post(
-                BASE_URL + "/v3/place_order",
-                data=p,
-                headers={"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(p)}
-            )
-            res = r2.json().get("OrderDetail", {})
-            status = res.get("Status", "ERROR")
-            price = res.get("FilledAverPrice", "N/A")
-            print(f"  → {status} @ {price}")
-            if status == "FILLED":
-                sold += 1
-            time.sleep(1)
+            success = False
+            for attempt in range(3):
+                p = {
+                    "timestamp": get_server_time(),
+                    "pair": pair,
+                    "side": "SELL",
+                    "quantity": qty,
+                    "type": "MARKET"
+                }
+                r2 = requests.post(
+                    BASE_URL + "/v3/place_order",
+                    data=p,
+                    headers={"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(p)}
+                )
+                print(f"[DEBUG] Sell attempt {attempt+1}: {r2.status_code} - {r2.text[:200]}...")
+                
+                if r2.status_code == 200:
+                    res = r2.json().get("OrderDetail", {})
+                    status = res.get("Status", "ERROR")
+                    price = res.get("FilledAverPrice", "N/A")
+                    print(f"  → {status} @ {price}")
+                    if status == "FILLED":
+                        sold += 1
+                        success = True
+                        break
+                    else:
+                        print(f"  → FAILED ({status}): {res}")
+                else:
+                    print(f"  → HTTP {r2.status_code}: {r2.text}")
+                time.sleep(2 ** attempt)  # Exponential backoff
+            
+            if not success:
+                failed.append((asset, qty))
+            
+            time.sleep(1)  # Rate limit buffer
     
-    print(f"SELL ALL COMPLETE — {sold} assets sold\n")
+    print(f"SELL ALL COMPLETE — {sold} sold, {len(failed)} failed: {failed}")
+    if failed:
+        print("WARNING: Some assets failed. Check pairs, min qty, or API limits.")
     print("-" * 60)
 
 
 # === 2. TRADING FUNCTIONS ===
 def get_ticker():
     r = requests.get(BASE_URL + "/v3/ticker", params={"timestamp": int(time.time())})
-    print(f"[DEBUG] ticker: {r.status_code}")
+    print(f"[TICKER] Status: {r.status_code}")
     data = r.json().get("Data", {})
     rising = [p for p, d in data.items() if d.get("Change", 0) >= 0.05]
     prices = [data[p]["LastPrice"] for p in rising]
@@ -149,7 +170,10 @@ if __name__ == "__main__":
             print(f"\n[SELL CHECK] @ {time.strftime('%H:%M:%S')}")
             rising, prices, market = get_ticker()
             for pair, pos in list(bought_stocks.items()):
-                cur = market[pair].get("AskPrice") or market[pair]["LastPrice"]
+                cur = market.get(pair, {}).get("AskPrice") or market.get(pair, {}).get("LastPrice")
+                if cur is None:
+                    print(f"  [SKIP] {pair}: No price data")
+                    continue
                 pnl = (cur - pos["price"]) / pos["price"]
                 print(f"  [P/L] {pair}: {pnl:+.2%}")
                 if pnl >= 0.03:
@@ -170,10 +194,19 @@ if __name__ == "__main__":
                 pair = rising[stock_index % len(rising)]
                 price = prices[stock_index % len(rising)]
                 qty = round(1000 / price, 1)
-                print(f"[BUY] Selecting {pair} @ {price:.6f} → Qty: {qty}")
-                place_order(pair, "BUY", qty)
-                stock_index += 1
+                if qty < 0.1:
+                    print(f"[SKIP BUY] {pair}: Qty {qty} too small")
+                else:
+                    print(f"[BUY] Selecting {pair} @ {price:.6f} → Qty: {qty}")
+                    place_order(pair, "BUY", qty)
+                    stock_index += 1
             next_buy_time = now + 900
             stopgainloss = False
 
-        time.sleep(10)
+        # Smart sleep: wait until next event
+        sleep_time = min(
+            max(0, next_sell_check - time.time()),
+            max(0, next_buy_time - time.time()),
+            10
+        )
+        time.sleep(sleep_time)

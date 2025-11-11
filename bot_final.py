@@ -19,28 +19,47 @@ stopgainloss = False
 stock_index = 0
 
 
+def get_server_time():
+    r = requests.get(BASE_URL + "/v3/serverTime")
+    if r.status_code == 200:
+        return r.json().get("serverTime")
+    return int(time.time() * 1000)
+
+def get_balance():
+    payload = {"timestamp": get_server_time() or int(time.time() * 1000)}
+    r = requests.get(
+        BASE_URL + "/v3/balance",
+        params=payload,
+        headers={"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
+    )
+    return r.json()
+
 def sign(params):
     query = '&'.join([f"{k}={params[k]}" for k in sorted(params)])
     return hmac.new(SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
 
 
 # === 1. SELL ALL HOLDINGS (RUN ONCE) ===
-def sell_all_once():
+def sell_all_at_once():
     print(f"\nSELL ALL HOLDINGS — {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
+    
+    # Get balance using the same payload structure
     payload = {"timestamp": int(time.time() * 1000)}
     r = requests.get(
         BASE_URL + "/v3/balance",
         params=payload,
         headers={"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
     )
-    data = r.json().get("SpotWallet", {})
+    data = r.json().get("Wallet", {})   # <-- CHANGED: "Wallet" instead of "SpotWallet"
+    
     sold = 0
     for asset, info in data.items():
-        free = info.get("Free", 0)
+        free = info.get("Free", 0)       # <-- CHANGED: "Free" (capital F)
         if free > 0 and asset != "USD":
             pair = f"{asset}/USD"
             qty = round(free, 6)
             print(f"[SELL] {qty} {pair}")
+            
             p = {
                 "timestamp": int(time.time() * 1000),
                 "pair": pair,
@@ -60,6 +79,7 @@ def sell_all_once():
             if status == "FILLED":
                 sold += 1
             time.sleep(1)
+    
     print(f"SELL ALL COMPLETE — {sold} assets sold\n")
     print("-" * 60)
 
@@ -114,7 +134,7 @@ if __name__ == "__main__":
     print("-" * 60)
 
     # === RUN SELL ALL ONCE ===
-    sell_all_once()
+    sell_all_at_once()
 
     # === START TRADING LOOP ===
     print("TRADING LOOP STARTED")

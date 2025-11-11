@@ -70,14 +70,19 @@ def get_ticker():
 def place_order(pair, side, qty):
     global bought_stocks
     
-    # === STEP SIZE RULES (FROM ROOSTOO MOCK) ===
+    # === STEP SIZES (CONFIRMED FROM ROOSTOO MOCK) ===
     STEP_SIZES = {
         'FET/USD': 0.001,
         'UNI/USD': 0.001,
         'AAVE/USD': 0.001,
+        'APT/USD': 0.01,
+        'SOL/USD': 0.01,
+        'ETH/USD': 0.0001,
+        'BTC/USD': 0.00001,
         'ADA/USD': 0.1,
         'XRP/USD': 0.1,
         'DOGE/USD': 0.1,
+        'XLM/USD': 0.1,
         'BONK/USD': 1.0,
         'SHIB/USD': 1000.0,
         'PEPE/USD': 1000.0,
@@ -87,22 +92,33 @@ def place_order(pair, side, qty):
         'SOMI/USD': 0.1,
         'TRUMP/USD': 0.1,
         'EDEN/USD': 0.1,
-        'XLM/USD': 0.1,
-        'APT/USD': 0.01,
-        'SOL/USD': 0.01,
-        'ETH/USD': 0.0001,
-        'BTC/USD': 0.00001,
     }
     
-    step = STEP_SIZES.get(pair, 0.001)  # Default 0.001
-    qty_rounded = (qty // step) * step  # Round down to step
+    step = STEP_SIZES.get(pair, 0.001)
+    qty_rounded = (qty // step) * step
     if qty_rounded < step:
         print(f"[SKIP] {pair}: qty {qty_rounded} < min step {step}")
         return False
-    
-    qty_str = f"{qty_rounded:.10f}".rstrip('0').rstrip('.')
-    print(f"[ROUNDED] {qty} → {qty_str} (step {step})")
-    
+
+    # === FORMAT QTY STRING BASED ON STEP ===
+    if step == 1.0:
+        qty_str = str(int(qty_rounded))
+    elif step == 0.1:
+        qty_str = f"{qty_rounded:.1f}"
+    elif step == 0.01:
+        qty_str = f"{qty_rounded:.2f}"
+    elif step == 0.001:
+        qty_str = f"{qty_rounded:.3f}"   # FET, UNI → 3 decimals
+    elif step == 0.0001:
+        qty_str = f"{qty_rounded:.4f}"
+    elif step == 0.00001:
+        qty_str = f"{qty_rounded:.5f}"
+    else:
+        qty_str = f"{qty_rounded:.6f}"
+
+    qty_str = qty_str.rstrip('0').rstrip('.') if '.' in qty_str else qty_str
+    print(f"[ROUNDED] {qty:.6f} → {qty_str} (step {step})")
+
     ts = get_server_time()
     payload = {
         "timestamp": ts,
@@ -116,7 +132,7 @@ def place_order(pair, side, qty):
         "MSG-SIGNATURE": sign(payload)
     }
     r = requests.post(BASE_URL + "/v3/place_order", data=payload, headers=headers)
-    print(f"[ORDER {side}] {qty_str} {pair} | Status: {r.status_code} | {r.text[:200]}")
+    print(f"[ORDER {side}] {qty_str} {pair} | {r.status_code} | {r.text[:200]}")
     
     try:
         res = r.json()
@@ -129,8 +145,8 @@ def place_order(pair, side, qty):
                 bought_stocks.pop(pair, None)
                 print(f"[SOLD] {pair}")
             return True
-    except:
-        pass
+    except Exception as e:
+        print(f"[JSON ERROR] {e}")
     return False
 
 

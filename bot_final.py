@@ -68,14 +68,33 @@ def place_order(pair, side, qty):
         return True
     return False
 
+# === SELL ALL ONCE ===
+def sell_all_at_once():
+    print(f"\nSELL ALL — {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
+    r = get_balance()
+    if r.status_code != 200:
+        print("Balance failed.")
+        return
+    wallet = r.json().get("SpotWallet", {})
+    to_sell = [(asset, float(info["Free"])) for asset, info in wallet.items() if float(info["Free"]) > 0.1 and asset != "USD"]
+    print(f"Found {len(to_sell)} assets to sell")
+    for asset, free in to_sell:
+        pair = f"{asset}/USD"
+        qty = round(free, 1)
+        print(f"[SELL] {qty} {pair}")
+        place_order(pair, "SELL", qty)
+        time.sleep(1)
+    print("SELL ALL COMPLETE")
+    print("-" * 60)
+
 
 # === MAIN ===
 if __name__ == "__main__":
     print("ROOSTOO MOCK BOT — LIVE")
     print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
-    print("Strategy: Buy +$0.05 | TP +36% | SL -4% | Max 2 positions")
+    print("Strategy: Buy +$0.05 | TP +3% | SL -4% | Max 2 positions")
     print("-" * 60)
-
+    sell_all_at_once()
 
     while True:
         now = time.time()

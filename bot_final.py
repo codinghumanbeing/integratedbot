@@ -6,6 +6,7 @@ import requests
 import hashlib
 import hmac
 import time
+import urllib.parse  # For potential encoding debug
 
 API_KEY = "Uf1MjnJxofjvkQPyrN1YKTEdERgsjGtBznDVh8hqmEG4gqjHvgc1FCI6EqGmKvuy"
 SECRET = "5CL4KCVLEYyLLaSq2Jg7VCCu3QsWQYTcv1gQTMngnBG81YJ9VWopJBIwIqsaNjqR"
@@ -20,35 +21,54 @@ stock_index = 0
 
 
 def get_server_time():
-    r = requests.get(BASE_URL + "/v3/serverTime")
-    if r.status_code == 200:
-        return r.json().get("serverTime")
-    return int(time.time() * 1000)
+    for attempt in range(2):  # Retry once
+        try:
+            r = requests.get(BASE_URL + "/v3/serverTime")
+            if r.status_code == 200:
+                return r.json().get("serverTime")
+        except:
+            pass
+        time.sleep(1)
+    return int(time.time() * 1000)  # Fallback
 
 
 def sign(params):
+    # Build query string from sorted keys
     query = '&'.join([f"{k}={params[k]}" for k in sorted(params)])
-    return hmac.new(SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
+    print(f"[DEBUG SIGN] Query string: {query}")  # <-- NEW: See exact signed string
+    signature = hmac.new(SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
+    print(f"[DEBUG SIGN] Signature: {signature}")  # <-- NEW
+    return signature
+
+
+def get_balance():
+    ts = get_server_time()
+    payload = {"timestamp": ts}
+    print(f"[DEBUG BALANCE] Timestamp: {ts}, Payload: {payload}")
+    
+    # Use POST like place_order to avoid GET param encoding issues
+    r = requests.post(  # <-- CHANGED: POST with data
+        BASE_URL + "/v3/balance",
+        data=payload,  # <-- CHANGED: data= (body), not params
+        headers={"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
+    )
+    print(f"[DEBUG BALANCE] Response: {r.status_code} - {r.text[:300]}...")
+    return r
 
 
 # === 1. SELL ALL HOLDINGS (RUN ONCE - BULLETPROOF VERSION) ===
 def sell_all_at_once():
     print(f"\nSELL ALL HOLDINGS — {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
     
-    # Get server time
-    ts = get_server_time()
-    
-    # Get balance
-    payload = {"timestamp": ts}
-    r = requests.get(
-        BASE_URL + "/v3/balance",
-        params=payload,
-        headers={"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
-    )
-    print(f"[DEBUG] Balance response: {r.status_code} - {r.text[:300]}...")
-    
-    if r.status_code != 200:
-        print(f"ERROR: Balance fetch failed - {r.text}")
+    # Get balance with retry
+    for attempt in range(2):
+        r = get_balance()
+        if r.status_code == 200:
+            break
+        print(f"[ERROR] Balance attempt {attempt+1} failed. Retrying...")
+        time.sleep(2)
+    else:
+        print(f"ERROR: Balance fetch failed after retries - {r.text}")
         return
     
     data = r.json().get("Wallet", {})
@@ -65,13 +85,15 @@ def sell_all_at_once():
             
             success = False
             for attempt in range(3):
+                ts = get_server_time()
                 p = {
-                    "timestamp": get_server_time(),
+                    "timestamp": ts,
                     "pair": pair,
                     "side": "SELL",
                     "quantity": qty,
                     "type": "MARKET"
                 }
+                print(f"[DEBUG SELL] Payload: {p}")  # <-- NEW: See sell payload
                 r2 = requests.post(
                     BASE_URL + "/v3/place_order",
                     data=p,
@@ -107,7 +129,8 @@ def sell_all_at_once():
 
 # === 2. TRADING FUNCTIONS ===
 def get_ticker():
-    r = requests.get(BASE_URL + "/v3/ticker", params={"timestamp": int(time.time())})
+    ts = int(time.time() * 1000)
+    r = requests.get(BASE_URL + "/v3/ticker", params={"timestamp": ts})
     print(f"[TICKER] Status: {r.status_code}")
     data = r.json().get("Data", {})
     rising = [p for p, d in data.items() if d.get("Change", 0) >= 0.05]
@@ -120,7 +143,7 @@ def place_order(pair, side, qty):
     global bought_stocks
     qty = round(qty, 1)
     payload = {
-        "timestamp": int(time.time() * 1000),
+        "timestamp": get_server_time(),
         "pair": pair,
         "side": side,
         "quantity": qty,
@@ -174,7 +197,7 @@ if __name__ == "__main__":
                 if cur is None:
                     print(f"  [SKIP] {pair}: No price data")
                     continue
-                pnl = (cur - pos["price"]) / pos["price"]
+                pnl = (float(cur) - pos["price"]) / pos["price"]
                 print(f"  [P/L] {pair}: {pnl:+.2%}")
                 if pnl >= 0.03:
                     print(f"  TAKE PROFIT +3%")
@@ -191,8 +214,9 @@ if __name__ == "__main__":
             print(f"\n[BUY CYCLE] @ {time.strftime('%H:%M:%S')}")
             rising, prices, market = get_ticker()
             if rising and not stopgainloss:
-                pair = rising[stock_index % len(rising)]
-                price = prices[stock_index % len(rising)]
+                idx = stock_index % len(rising)
+                pair = rising[idx]
+                price = float(prices[idx])
                 qty = round(1000 / price, 1)
                 if qty < 0.1:
                     print(f"[SKIP BUY] {pair}: Qty {qty} too small")
@@ -205,8 +229,7 @@ if __name__ == "__main__":
 
         # Smart sleep: wait until next event
         sleep_time = min(
-            max(0, next_sell_check - time.time()),
-            max(0, next_buy_time - time.time()),
+            *[max(0, t - time.time()) for t in [next_sell_check, next_buy_time] if t > 0],
             10
         )
         time.sleep(sleep_time)

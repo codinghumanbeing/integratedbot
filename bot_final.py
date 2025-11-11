@@ -69,12 +69,46 @@ def get_ticker():
 
 def place_order(pair, side, qty):
     global bought_stocks
+    
+    # === STEP SIZE RULES (FROM ROOSTOO MOCK) ===
+    STEP_SIZES = {
+        'FET/USD': 0.001,
+        'UNI/USD': 0.001,
+        'AAVE/USD': 0.001,
+        'ADA/USD': 0.1,
+        'XRP/USD': 0.1,
+        'DOGE/USD': 0.1,
+        'BONK/USD': 1.0,
+        'SHIB/USD': 1000.0,
+        'PEPE/USD': 1000.0,
+        'FLOKI/USD': 100.0,
+        'WLFI/USD': 0.1,
+        'PUMP/USD': 0.1,
+        'SOMI/USD': 0.1,
+        'TRUMP/USD': 0.1,
+        'EDEN/USD': 0.1,
+        'XLM/USD': 0.1,
+        'APT/USD': 0.01,
+        'SOL/USD': 0.01,
+        'ETH/USD': 0.0001,
+        'BTC/USD': 0.00001,
+    }
+    
+    step = STEP_SIZES.get(pair, 0.001)  # Default 0.001
+    qty_rounded = (qty // step) * step  # Round down to step
+    if qty_rounded < step:
+        print(f"[SKIP] {pair}: qty {qty_rounded} < min step {step}")
+        return False
+    
+    qty_str = f"{qty_rounded:.10f}".rstrip('0').rstrip('.')
+    print(f"[ROUNDED] {qty} → {qty_str} (step {step})")
+    
     ts = get_server_time()
     payload = {
         "timestamp": ts,
         "pair": pair,
         "side": side,
-        "quantity": str(round(qty, 6)),
+        "quantity": qty_str,
         "type": "MARKET"
     }
     headers = {
@@ -82,16 +116,15 @@ def place_order(pair, side, qty):
         "MSG-SIGNATURE": sign(payload)
     }
     r = requests.post(BASE_URL + "/v3/place_order", data=payload, headers=headers)
-    print(f"[ORDER {side}] {qty} {pair} | Status: {r.status_code} | {r.text[:200]}")
+    print(f"[ORDER {side}] {qty_str} {pair} | Status: {r.status_code} | {r.text[:200]}")
+    
     try:
         res = r.json()
-        od = res.get("OrderDetail", {})
-        status = od.get("Status")
-        if status == "FILLED":
-            price = float(od.get("FilledAverPrice", 0))
+        if res.get("Success") and res.get("OrderDetail", {}).get("Status") == "FILLED":
+            price = float(res["OrderDetail"].get("FilledAverPrice", 0))
             if side == "BUY":
-                bought_stocks[pair] = {"price": price, "qty": qty}
-                print(f"[BOUGHT] {pair} @ {price:.4f}")
+                bought_stocks[pair] = {"price": price, "qty": qty_rounded}
+                print(f"[BOUGHT] {pair} @ {price:.6f} | Qty: {qty_rounded}")
             else:
                 bought_stocks.pop(pair, None)
                 print(f"[SOLD] {pair}")

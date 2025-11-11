@@ -53,14 +53,17 @@ def get_ticker():
     payload = {"timestamp": ts}
     headers = {"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
     r = requests.get(BASE_URL + "/v3/ticker", params=payload, headers=headers)
-    print(f"[TICKER] Status: {r.status_code} | {r.text[:100]}")
+    print(f"[TICKER] Status: {r.status_code}")
     if r.status_code != 200:
         return [], [], {}
     data = r.json().get("Data", {})
-    rising = [p for p, d in data.items() if float(d.get("Change", 0)) >= 5.0]
+    
+    # Buy: coins up $0.05 or more
+    rising = [p for p, d in data.items() if float(d.get("Change", 0)) >= 0.05]
     prices = [float(data[p]["LastPrice"]) for p in rising]
     market = data
-    print(f"[TICKER] {len(rising)} rising: {rising[:3]}...")
+    
+    print(f"[TICKER] {len(rising)} up $0.05+: {rising[:3]}")
     return rising, prices, market
 
 

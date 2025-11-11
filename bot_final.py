@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# bot_final.py — ROOSTOO COMPETITION — FINAL WORKING
+# ROOSTOO MOCK BOT — FINAL, MINIMAL, WORKING
 import requests
 import hashlib
 import hmac
@@ -16,187 +16,99 @@ next_sell_check = 0
 next_buy_time = 0
 stopgainloss = False
 stock_index = 0
-
-
-def get_server_time():
-    r = requests.get(BASE_URL + "/v3/serverTime")
-    print(f"[TIME] Status: {r.status_code} | {r.text[:100]}")
-    if r.status_code == 200:
-        return r.json().get("ServerTime")  # FIXED: Capital S
-    return int(time.time() * 1000)
+MAX_POSITIONS = 3
 
 
 def sign(params):
     query = '&'.join([f"{k}={params[k]}" for k in sorted(params)])
-    sig = hmac.new(SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
-    print(f"[SIGN] {query[:60]}... → {sig[:8]}...")
-    return sig
+    return hmac.new(SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
 
 
 def get_balance():
-    ts = get_server_time()
-    if ts is None:
-        print("[ERROR] Server time is None")
-        return None
+    ts = int(time.time() * 1000)
     payload = {"timestamp": ts}
-    headers = {
-        "RST-API-KEY": API_KEY,
-        "MSG-SIGNATURE": sign(payload)
-    }
+    headers = {"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
     r = requests.get(BASE_URL + "/v3/balance", params=payload, headers=headers)
-    print(f"[BALANCE] Status: {r.status_code} | {r.text[:200]}")
+    print(f"[BALANCE] {r.status_code} | {r.text[:200]}")
     return r
 
 
 def get_ticker():
-    ts = get_server_time()
-    payload = {"timestamp": ts}
-    headers = {"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
-    r = requests.get(BASE_URL + "/v3/ticker", params=payload, headers=headers)
-    print(f"[TICKER] Status: {r.status_code}")
-    if r.status_code != 200:
-        return [], [], {}
+    r = requests.get(BASE_URL + "/v3/ticker", params={"timestamp": int(time.time())})
     data = r.json().get("Data", {})
-    
-    # Buy: coins up $0.05 or more
     rising = [p for p, d in data.items() if float(d.get("Change", 0)) >= 0.05]
     prices = [float(data[p]["LastPrice"]) for p in rising]
-    market = data
-    
-    print(f"[TICKER] {len(rising)} up $0.05+: {rising[:3]}")
-    return rising, prices, market
+    print(f"[TICKER] {len(rising)} up $0.05+: {rising[:3]}...")
+    return rising, prices, data
 
 
 def place_order(pair, side, qty):
     global bought_stocks
-    
-    # === STEP SIZES (CONFIRMED FROM ROOSTOO MOCK) ===
-    STEP_SIZES = {
-        'FET/USD': 0.001,
-        'UNI/USD': 0.001,
-        'AAVE/USD': 0.001,
-        'APT/USD': 0.01,
-        'SOL/USD': 0.01,
-        'ETH/USD': 0.0001,
-        'BTC/USD': 0.00001,
-        'ADA/USD': 0.1,
-        'XRP/USD': 0.1,
-        'DOGE/USD': 0.1,
-        'XLM/USD': 0.1,
-        'BONK/USD': 1.0,
-        'SHIB/USD': 1000.0,
-        'PEPE/USD': 1000.0,
-        'FLOKI/USD': 100.0,
-        'WLFI/USD': 0.1,
-        'PUMP/USD': 0.1,
-        'SOMI/USD': 0.1,
-        'TRUMP/USD': 0.1,
-        'EDEN/USD': 0.1,
-    }
-    
-    step = STEP_SIZES.get(pair, 0.001)
-    qty_rounded = (qty // step) * step
-    if qty_rounded < step:
-        print(f"[SKIP] {pair}: qty {qty_rounded} < min step {step}")
-        return False
-
-    # === FORMAT QTY STRING BASED ON STEP ===
-    if step == 1.0:
-        qty_str = str(int(qty_rounded))
-    elif step == 0.1:
-        qty_str = f"{qty_rounded:.1f}"
-    elif step == 0.01:
-        qty_str = f"{qty_rounded:.2f}"
-    elif step == 0.001:
-        qty_str = f"{qty_rounded:.3f}"   # FET, UNI → 3 decimals
-    elif step == 0.0001:
-        qty_str = f"{qty_rounded:.4f}"
-    elif step == 0.00001:
-        qty_str = f"{qty_rounded:.5f}"
-    else:
-        qty_str = f"{qty_rounded:.6f}"
-
-    qty_str = qty_str.rstrip('0').rstrip('.') if '.' in qty_str else qty_str
-    print(f"[ROUNDED] {qty:.6f} → {qty_str} (step {step})")
-
-    ts = get_server_time()
+    qty = round(qty, 1)  # YOUR GOLDEN RULE
     payload = {
-        "timestamp": ts,
+        "timestamp": int(time.time() * 1000),
         "pair": pair,
         "side": side,
-        "quantity": qty_str,
+        "quantity": qty,
         "type": "MARKET"
     }
-    headers = {
-        "RST-API-KEY": API_KEY,
-        "MSG-SIGNATURE": sign(payload)
-    }
+    headers = {"RST-API-KEY": API_KEY, "MSG-SIGNATURE": sign(payload)}
     r = requests.post(BASE_URL + "/v3/place_order", data=payload, headers=headers)
-    print(f"[ORDER {side}] {qty_str} {pair} | {r.status_code} | {r.text[:200]}")
-    
-    try:
-        res = r.json()
-        if res.get("Success") and res.get("OrderDetail", {}).get("Status") == "FILLED":
-            price = float(res["OrderDetail"].get("FilledAverPrice", 0))
-            if side == "BUY":
-                bought_stocks[pair] = {"price": price, "qty": qty_rounded}
-                print(f"[BOUGHT] {pair} @ {price:.6f} | Qty: {qty_rounded}")
-            else:
-                bought_stocks.pop(pair, None)
-                print(f"[SOLD] {pair}")
-            return True
-    except Exception as e:
-        print(f"[JSON ERROR] {e}")
+    print(f"[ORDER {side}] {qty} {pair} → {r.status_code}")
+    res = r.json()
+    od = res.get("OrderDetail", {})
+    if od.get("Status") == "FILLED":
+        price = float(od["FilledAverPrice"])
+        if side == "BUY":
+            bought_stocks[pair] = {"price": price, "qty": qty}
+            print(f"[BOUGHT] {pair} @ {price:.6f} | Holdings: {len(bought_stocks)}")
+        else:
+            bought_stocks.pop(pair, None)
+            print(f"[SOLD] {pair} | Holdings: {len(bought_stocks)}")
+        return True
     return False
 
 
-# === SELL ALL (ONCE) ===
+# === SELL ALL ONCE ===
 def sell_all_at_once():
     print(f"\nSELL ALL — {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
     r = get_balance()
-    if not r or r.status_code != 200:
-        print("ERROR: Balance failed.")
+    if r.status_code != 200:
+        print("Balance failed.")
         return
-    
     wallet = r.json().get("SpotWallet", {})
-    to_sell = []
-    for asset, info in wallet.items():
-        free = float(info.get("Free", 0))
-        if free > 0.0001 and asset != "USD":
-            to_sell.append((asset, free))
-    
-    print(f"Found {len(to_sell)} assets to sell: {[a for a, _ in to_sell[:5]]}...")
-    sold = 0
+    to_sell = [(asset, float(info["Free"])) for asset, info in wallet.items() if float(info["Free"]) > 0.1 and asset != "USD"]
+    print(f"Found {len(to_sell)} assets to sell")
     for asset, free in to_sell:
-        pair = f"{asset}/USD"  # FIXED: /USD not USD
-        qty = round(free, 6)
+        pair = f"{asset}/USD"
+        qty = round(free, 1)
         print(f"[SELL] {qty} {pair}")
-        if place_order(pair, "SELL", qty):
-            sold += 1
+        place_order(pair, "SELL", qty)
         time.sleep(1)
-    
-    print(f"SELL ALL COMPLETE — {sold}/{len(to_sell)} sold")
+    print("SELL ALL COMPLETE")
     print("-" * 60)
 
 
 # === MAIN ===
 if __name__ == "__main__":
-    print("BOT STARTED")
+    print("ROOSTOO MOCK BOT — LIVE")
     print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
+    print("Strategy: Buy +$0.05 | TP +3% | SL -1.5% | Max 3 positions")
     print("-" * 60)
+
     sell_all_at_once()
-    print("TRADING STARTED")
-    print("-" * 60)
+
     while True:
         now = time.time()
+
+        # SELL CHECK
         if now >= next_sell_check and bought_stocks:
             print(f"\n[SELL CHECK] {time.strftime('%H:%M:%S')}")
             _, _, market = get_ticker()
             for pair, pos in list(bought_stocks.items()):
-                d = market.get(pair, {})
-                cur = float(d.get("AskPrice") or d.get("LastPrice", 0))
-                if cur == 0: continue
+                cur = float(market[pair].get("AskPrice") or market[pair]["LastPrice"])
                 pnl = (cur - pos["price"]) / pos["price"]
+                print(f"  [P/L] {pair}: {pnl:+.2%}")
                 if pnl >= 0.03:
                     place_order(pair, "SELL", pos["qty"])
                     stopgainloss = True
@@ -204,17 +116,22 @@ if __name__ == "__main__":
                     place_order(pair, "SELL", pos["qty"])
                     stopgainloss = True
             next_sell_check = now + 300
-        if now >= next_buy_time or stopgainloss:
-            print(f"\n[BUY] {time.strftime('%H:%M:%S')}")
+
+        # BUY CYCLE
+        if (now >= next_buy_time or stopgainloss) and len(bought_stocks) < MAX_POSITIONS:
+            print(f"\n[BUY CYCLE] {time.strftime('%H:%M:%S')}")
             rising, prices, _ = get_ticker()
             if rising and not stopgainloss:
                 idx = stock_index % len(rising)
                 pair = rising[idx]
                 price = prices[idx]
-                qty = round(1000 / price, 6)
-                if qty > 0.000001:
-                    place_order(pair, "BUY", qty)
-                    stock_index += 1
+                qty = round(1000 / price, 1)
+                print(f"[BUY] {pair} @ {price:.6f} → {qty}")
+                place_order(pair, "BUY", qty)
+                stock_index += 1
             next_buy_time = now + 900
             stopgainloss = False
+        elif len(bought_stocks) >= MAX_POSITIONS:
+            print(f"[MAX POSITIONS] {len(bought_stocks)}/3 — waiting...")
+
         time.sleep(10)

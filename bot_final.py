@@ -98,20 +98,24 @@ def place_order(pair, side, qty):
     return False
 
 
-# === SELL ALL ===
+# === SELL ALL (ONCE) ===
 def sell_all_at_once():
     print(f"\nSELL ALL — {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
     r = get_balance()
     if not r or r.status_code != 200:
-        print("ERROR: Balance failed. Check keys or network.")
+        print("ERROR: Balance failed.")
         return
-    wallet = r.json().get("Wallet", {})
+    
+    # FIXED: Use "SpotWallet" from your actual response
+    wallet = r.json().get("SpotWallet", {})
+    
     to_sell = []
     for asset, info in wallet.items():
         free = float(info.get("Free", 0))
         if free > 0.0001 and asset != "USD":
             to_sell.append((asset, free))
-    print(f"Found {len(to_sell)} assets to sell")
+    
+    print(f"Found {len(to_sell)} assets to sell: {[a for a, _ in to_sell[:5]]}...")
     sold = 0
     for asset, free in to_sell:
         pair = f"{asset}USD"
@@ -120,6 +124,7 @@ def sell_all_at_once():
         if place_order(pair, "SELL", qty):
             sold += 1
         time.sleep(1)
+    
     print(f"SELL ALL COMPLETE — {sold}/{len(to_sell)} sold")
     print("-" * 60)
 

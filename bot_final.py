@@ -16,7 +16,7 @@ next_sell_check = 0
 next_buy_time = 0
 stopgainloss = False
 stock_index = 0
-MAX_POSITIONS = 3
+MAX_POSITIONS = 2
 
 
 def sign(params):
@@ -69,34 +69,13 @@ def place_order(pair, side, qty):
     return False
 
 
-# === SELL ALL ONCE ===
-def sell_all_at_once():
-    print(f"\nSELL ALL — {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
-    r = get_balance()
-    if r.status_code != 200:
-        print("Balance failed.")
-        return
-    wallet = r.json().get("SpotWallet", {})
-    to_sell = [(asset, float(info["Free"])) for asset, info in wallet.items() if float(info["Free"]) > 0.1 and asset != "USD"]
-    print(f"Found {len(to_sell)} assets to sell")
-    for asset, free in to_sell:
-        pair = f"{asset}/USD"
-        qty = round(free, 1)
-        print(f"[SELL] {qty} {pair}")
-        place_order(pair, "SELL", qty)
-        time.sleep(1)
-    print("SELL ALL COMPLETE")
-    print("-" * 60)
-
-
 # === MAIN ===
 if __name__ == "__main__":
     print("ROOSTOO MOCK BOT — LIVE")
     print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')} HKT")
-    print("Strategy: Buy +$0.05 | TP +3% | SL -1.5% | Max 3 positions")
+    print("Strategy: Buy +$0.05 | TP +36% | SL -4% | Max 2 positions")
     print("-" * 60)
 
-    sell_all_at_once()
 
     while True:
         now = time.time()
@@ -109,13 +88,13 @@ if __name__ == "__main__":
                 cur = float(market[pair].get("AskPrice") or market[pair]["LastPrice"])
                 pnl = (cur - pos["price"]) / pos["price"]
                 print(f"  [P/L] {pair}: {pnl:+.2%}")
-                if pnl >= 0.03:
+                if pnl >= 0.06:
                     place_order(pair, "SELL", pos["qty"])
                     stopgainloss = True
-                elif pnl <= -0.015:
+                elif pnl <= -0.04:
                     place_order(pair, "SELL", pos["qty"])
                     stopgainloss = True
-            next_sell_check = now + 300
+            next_sell_check = now + 120
 
         # BUY CYCLE
         if (now >= next_buy_time or stopgainloss) and len(bought_stocks) < MAX_POSITIONS:
@@ -125,11 +104,11 @@ if __name__ == "__main__":
                 idx = stock_index % len(rising)
                 pair = rising[idx]
                 price = prices[idx]
-                qty = round(1000 / price, 1)
+                qty = round(500 / price, 1)
                 print(f"[BUY] {pair} @ {price:.6f} → {qty}")
                 place_order(pair, "BUY", qty)
                 stock_index += 1
-            next_buy_time = now + 900
+            next_buy_time = now + 1800
             stopgainloss = False
         elif len(bought_stocks) >= MAX_POSITIONS:
             print(f"[MAX POSITIONS] {len(bought_stocks)}/3 — waiting...")

@@ -106,9 +106,7 @@ def sell_all_at_once():
         print("ERROR: Balance failed.")
         return
     
-    # FIXED: Use "SpotWallet" from your actual response
     wallet = r.json().get("SpotWallet", {})
-    
     to_sell = []
     for asset, info in wallet.items():
         free = float(info.get("Free", 0))
@@ -118,7 +116,7 @@ def sell_all_at_once():
     print(f"Found {len(to_sell)} assets to sell: {[a for a, _ in to_sell[:5]]}...")
     sold = 0
     for asset, free in to_sell:
-        pair = f"{asset}USD"
+        pair = f"{asset}/USD"  # FIXED: /USD not USD
         qty = round(free, 6)
         print(f"[SELL] {qty} {pair}")
         if place_order(pair, "SELL", qty):
